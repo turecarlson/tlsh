@@ -350,7 +350,7 @@ function find_quartile(tlsh, quartiles)
 
 ///////////////////////////////////////////////////////////////////////////////////
 // Definition of tlsh object
-class Tlsh {
+export class Tlsh {
     constructor() {
         this.checksum = new Uint8Array(TLSH_CHECKSUM_LEN); // unsigned char array
         this.slide_window = new Uint8Array(SLIDING_WND_SIZE);
