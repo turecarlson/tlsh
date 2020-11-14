@@ -350,18 +350,257 @@ function find_quartile(tlsh, quartiles)
 
 ///////////////////////////////////////////////////////////////////////////////////
 // Definition of tlsh object
-var Tlsh = function () 
-{
-    this.checksum = new Uint8Array(TLSH_CHECKSUM_LEN);   // unsigned char array
-    this.slide_window = new Uint8Array(SLIDING_WND_SIZE);
-    this.a_bucket = new Uint32Array(BUCKETS);            // unsigned int array
-    this.data_len = 0;
-    this.tmp_code = new Uint8Array(CODE_SIZE);
-    this.Lvalue = 0;
-    this.Q = 0;
-    this.lsh_code = new String;   
-    this.lsh_code_valid = false;   
-};
+class Tlsh {
+    constructor() {
+        this.checksum = new Uint8Array(TLSH_CHECKSUM_LEN); // unsigned char array
+        this.slide_window = new Uint8Array(SLIDING_WND_SIZE);
+        this.a_bucket = new Uint32Array(BUCKETS); // unsigned int array
+        this.data_len = 0;
+        this.tmp_code = new Uint8Array(CODE_SIZE);
+        this.Lvalue = 0;
+        this.Q = 0;
+        this.lsh_code = new String;
+        this.lsh_code_valid = false;
+    }
+    // Allow caller to pass in length in case there are embedded null characters, as there
+    // are in strings str_1 and str_2 (see simple_test.cpp)
+    //
+    // length parameter defaults to str.length
+    update(str, length) {
+        length = typeof length !== 'undefined' ? length : str.length;
+
+        var data = [];
+        for (var i = 0; i < length; i++) {
+            var code = str.charCodeAt(i);
+            if (code > 255) {
+                alert("Unexpected " + str[i] + " has value " + code + " which is too large");
+                return;
+            }
+            // Since charCodeAt returns between 0~65536, simply save every character as 2-bytes
+            // data.push(code & 0xff00, code & 0xff);
+            data.push(code & 0xff);
+        }
+
+        if (length != data.length) {
+            alert("Unexpected string length:" + length + " is not equal to value unsigned char length: " + data.length);
+            return;
+        }
+
+        var j = this.data_len % RNG_SIZE;
+        var fed_len = this.data_len;
+
+        for (var i = 0; i < length; i++, fed_len++, j = RNG_IDX(j + 1)) {
+            this.slide_window[j] = data[i];
+            debug && console.log("slide_window[" + j + "]=" + this.slide_window[j]);
+
+            if (fed_len >= 4) {
+                //only calculate when input >= 5 bytes
+                var j_1 = RNG_IDX(j - 1);
+                var j_2 = RNG_IDX(j - 2);
+                var j_3 = RNG_IDX(j - 3);
+                var j_4 = RNG_IDX(j - 4);
+
+                for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {
+                    if (k == 0) {
+                        this.checksum[k] = b_mapping(0, this.slide_window[j], this.slide_window[j_1], this.checksum[k]);
+                        debug && console.log("tlsh.checksum[" + k + "]=" + this.checksum[k]);
+                    }
+                    else {
+                        // use calculated 1 byte checksums to expand the total checksum to 3 bytes
+                        this.checksum[k] = b_mapping(this.checksum[k - 1], this.slide_window[j], this.slide_window[j_1], this.checksum[k]);
+                    }
+                }
+
+                var r;
+                r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
+                r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
+                r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
+
+
+                this.a_bucket[r]++;
+                r = b_mapping(3, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_3]);
+                this.a_bucket[r]++;
+                r = b_mapping(5, this.slide_window[j], this.slide_window[j_2], this.slide_window[j_3]);
+                this.a_bucket[r]++;
+                r = b_mapping(7, this.slide_window[j], this.slide_window[j_2], this.slide_window[j_4]);
+                this.a_bucket[r]++;
+                r = b_mapping(11, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_4]);
+                this.a_bucket[r]++;
+                r = b_mapping(13, this.slide_window[j], this.slide_window[j_3], this.slide_window[j_4]);
+                this.a_bucket[r]++;
+            }
+        }
+        this.data_len += length;
+    }
+    // final is a reserved word
+    finale(str, length) {
+        if (typeof str !== 'undefined') {
+            this.update(str, length);
+        }
+
+        // incoming data must more than or equal to 512 bytes
+        if (this.data_len < 256) {
+            alert("ERROR: length too small - " + this.data_len); //  + ")");
+        }
+
+        var quartiles = new Object();
+        quartiles.q1 = 0;
+        quartiles.q2 = 0;
+        quartiles.q3 = 0;
+        find_quartile(this, quartiles);
+
+        // buckets must be more than 50% non-zero
+        var nonzero = 0;
+        for (var i = 0; i < CODE_SIZE; i++) {
+            for (var j = 0; j < 4; j++) {
+                if (this.a_bucket[4 * i + j] > 0) {
+                    nonzero++;
+                }
+            }
+        }
+        if (nonzero <= 4 * CODE_SIZE / 2) {
+            alert("ERROR: not enought variation in input - " + nonzero + " < " + 4 * CODE_SIZE / 2);
+        }
+
+        for (var i = 0; i < CODE_SIZE; i++) {
+            var h = 0;
+            for (var j = 0; j < 4; j++) {
+                var k = this.a_bucket[4 * i + j];
+                if (quartiles.q3 < k) {
+                    h += 3 << (j * 2); // leave the optimization j*2 = j<<1 or j*2 = j+j for compiler
+                } else if (quartiles.q2 < k) {
+                    h += 2 << (j * 2);
+                } else if (quartiles.q1 < k) {
+                    h += 1 << (j * 2);
+                }
+            }
+            this.tmp_code[i] = h;
+        }
+
+        this.Lvalue = l_capturing(this.data_len);
+        this.Q = setQLo(this.Q, ((quartiles.q1 * 100) / quartiles.q3) % 16);
+        this.Q = setQHi(this.Q, ((quartiles.q2 * 100) / quartiles.q3) % 16);
+        this.lsh_code_valid = true;
+    }
+    hash() {
+        if (this.lsh_code_valid == false) {
+            return "ERROR IN PROCESSING";
+        }
+
+        var tmp = new Object();
+        tmp.checksum = new Uint8Array(TLSH_CHECKSUM_LEN);
+        tmp.Lvalue = 0;
+        tmp.Q = 0;
+        tmp.tmp_code = new Uint8Array(CODE_SIZE);
+
+        for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {
+            tmp.checksum[k] = swap_byte(this.checksum[k]);
+            debug && console.log("After swap_byte for checksum: tmp.checksum:" + tmp.checksum[k] + ", tlsh.checksum:" + this.checksum[k]);
+        }
+        tmp.Lvalue = swap_byte(this.Lvalue);
+        tmp.Q = swap_byte(this.Q);
+        debug && console.log("After swap_byte for Q: tmp.Q:" + tmp.Q + ", tlsh.Q:" + this.Q);
+        for (var i = 0; i < CODE_SIZE; i++) {
+            tmp.tmp_code[i] = this.tmp_code[CODE_SIZE - 1 - i];
+            debug && console.log("tmp.tmp_code[" + i + "]:" + tmp.tmp_code[i]);
+        }
+
+        this.lsh_code = to_hex(tmp.checksum, TLSH_CHECKSUM_LEN);
+
+        tmpArray = new Uint8Array(1);
+        tmpArray[0] = tmp.Lvalue;
+        this.lsh_code = this.lsh_code.concat(to_hex(tmpArray, 1));
+
+        tmpArray[0] = tmp.Q;
+        this.lsh_code = this.lsh_code.concat(to_hex(tmpArray, 1));
+        this.lsh_code = this.lsh_code.concat(to_hex(tmp.tmp_code, CODE_SIZE));
+        return this.lsh_code;
+    }
+    reset() {
+        this.checksum = new Uint8Array(TLSH_CHECKSUM_LEN);
+        this.slide_window = new Uint8Array(SLIDING_WND_SIZE);
+        this.a_bucket = new Uint32Array(BUCKETS);
+        this.data_len = 0;
+        this.tmp_code = new Uint8Array(CODE_SIZE);
+        this.Lvalue = 0;
+        this.Q = 0;
+        this.lsh_code = new String;
+        this.lsh_code_valid = false;
+    }
+    // len_diff defaults to true
+    totalDiff(other, len_diff) {
+        if (this == other) {
+            return 0;
+        }
+
+        len_diff = typeof len_diff !== 'undefined' ? len_diff : true;
+        var diff = 0;
+
+        if (len_diff) {
+            var ldiff = mod_diff(this.Lvalue, other.Lvalue, RANGE_LVALUE);
+            if (ldiff == 0)
+                diff = 0;
+            else if (ldiff == 1)
+                diff = 1;
+
+            else
+                diff += ldiff * 12;
+        }
+
+        var q1diff = mod_diff(getQLo(this.Q), getQLo(other.Q), RANGE_QRATIO);
+        if (q1diff <= 1)
+            diff += q1diff;
+
+        else
+            diff += (q1diff - 1) * 12;
+
+        var q2diff = mod_diff(getQHi(this.Q), getQHi(other.Q), RANGE_QRATIO);
+        if (q2diff <= 1)
+            diff += q2diff;
+
+        else
+            diff += (q2diff - 1) * 12;
+
+        for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {
+            if (this.checksum[k] != other.checksum[k]) {
+                diff++;
+                break;
+            }
+        }
+
+        diff += h_distance(CODE_SIZE, this.tmp_code, other.tmp_code);
+
+        return diff;
+    }
+    fromTlshStr(str) {
+        if (str.length != TLSH_STRING_LEN) {
+            alert("Tlsh.fromTlshStr() - string has wrong length (" + str.length + " != " + TLSH_STRING_LEN + ")");
+            return;
+        }
+        for (var i = 0; i < TLSH_STRING_LEN; i++) {
+            if (!(
+                (str[i] >= '0' && str[i] <= '9') ||
+                (str[i] >= 'A' && str[i] <= 'F') ||
+                (str[i] >= 'a' && str[i] <= 'f'))) {
+                alert("Tlsh.fromTlshStr() - string has invalid (non-hex) characters");
+                return;
+            }
+        }
+
+        var tmp = from_hex(str);
+        // Order of assignment is based on order of fields in lsh_bin
+        // Also note that TLSH_CHECKSUM_LEN is 1
+        var i = 0;
+        this.checksum[i] = swap_byte(tmp[i++]);
+        this.Lvalue = swap_byte(tmp[i++]);
+        this.Q = swap_byte(tmp[i++]);
+
+        for (var j = 0; j < CODE_SIZE; j++) {
+            this.tmp_code[j] = (tmp[i + CODE_SIZE - 1 - j]);
+        }
+        this.lsh_code_valid = true;
+    }
+}
 
 // Use get/setQLo() and get/setQHi() from TLSH.java implementation 
 function getQLo(Q) 
@@ -384,252 +623,9 @@ function setQHi(Q, x)
     return (Q & 0x0F) | ((x & 0x0F) << 4);
 }
 
-// Allow caller to pass in length in case there are embedded null characters, as there
-// are in strings str_1 and str_2 (see simple_test.cpp)
-//
-// length parameter defaults to str.length
-Tlsh.prototype.update = function (str, length) 
-{
-    length = typeof length !== 'undefined' ?  length : str.length;
-
-    var data = [];
-    for(var i = 0; i < length; i++) {
-        var code = str.charCodeAt(i);
-        if (code > 255) {
-            alert("Unexpected " + str[i] + " has value " + code + " which is too large");
-            return;
-        }
-        // Since charCodeAt returns between 0~65536, simply save every character as 2-bytes
-        // data.push(code & 0xff00, code & 0xff);
-        data.push(code & 0xff);
-    }
-
-    if (length != data.length) 
-    {
-        alert("Unexpected string length:" + length + " is not equal to value unsigned char length: " + data.length);
-        return;
-    }
-
-    var j = this.data_len % RNG_SIZE;
-    var fed_len = this.data_len;
-
-    for( var i=0; i<length; i++, fed_len++, j=RNG_IDX(j+1) ) {
-        this.slide_window[j] = data[i];
-        debug && console.log("slide_window["+j+"]="+this.slide_window[j]);
-        
-        if ( fed_len >= 4 ) {
-            //only calculate when input >= 5 bytes
-            var j_1 = RNG_IDX(j-1);
-            var j_2 = RNG_IDX(j-2);
-            var j_3 = RNG_IDX(j-3);
-            var j_4 = RNG_IDX(j-4);
-           
-            for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {
-                 if (k == 0) {
-                     this.checksum[k] = b_mapping(0, this.slide_window[j], this.slide_window[j_1], this.checksum[k]);
-                     debug && console.log("tlsh.checksum["+k+"]="+this.checksum[k]);
-                 }
-                 else {
-                     // use calculated 1 byte checksums to expand the total checksum to 3 bytes
-                     this.checksum[k] = b_mapping(this.checksum[k-1], this.slide_window[j], this.slide_window[j_1], this.checksum[k]);
-                 }
-            }
-
-            var r;
-            r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
-            r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
-            r = b_mapping(2, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_2]);
 
 
-            this.a_bucket[r]++;
-            r = b_mapping(3, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_3]);
-            this.a_bucket[r]++;
-            r = b_mapping(5, this.slide_window[j], this.slide_window[j_2], this.slide_window[j_3]);
-            this.a_bucket[r]++;
-            r = b_mapping(7, this.slide_window[j], this.slide_window[j_2], this.slide_window[j_4]);
-            this.a_bucket[r]++;
-            r = b_mapping(11, this.slide_window[j], this.slide_window[j_1], this.slide_window[j_4]);
-            this.a_bucket[r]++;
-            r = b_mapping(13, this.slide_window[j], this.slide_window[j_3], this.slide_window[j_4]);
-            this.a_bucket[r]++;
-        }
-    }
-    this.data_len += length;
-}
 
-// final is a reserved word
-Tlsh.prototype.finale = function (str, length) 
-{
-    if (typeof str !== 'undefined') {
-		this.update(str, length);
-	}
 
-    // incoming data must more than or equal to 512 bytes
-    if (this.data_len < 256) {
-      alert("ERROR: length too small - " + this.data_len); //  + ")");
-    }
-    
-    var quartiles = new Object();
-    quartiles.q1 = 0;
-    quartiles.q2 = 0;
-    quartiles.q3 = 0;
-    find_quartile(this, quartiles);
 
-    // buckets must be more than 50% non-zero
-    var nonzero = 0;
-    for(var i=0; i<CODE_SIZE; i++) {
-      for(var j=0; j<4; j++) {
-        if (this.a_bucket[4*i + j] > 0) {
-          nonzero++;
-        }
-      }
-    }
-    if (nonzero <= 4*CODE_SIZE/2) {
-      alert("ERROR: not enought variation in input - " + nonzero + " < " + 4*CODE_SIZE/2);
-    }
-    
-    for(var i=0; i<CODE_SIZE; i++) {
-        var h=0;
-        for(var j=0; j<4; j++) {
-            var k = this.a_bucket[4*i + j];
-            if( quartiles.q3 < k ) {
-                h += 3 << (j*2);  // leave the optimization j*2 = j<<1 or j*2 = j+j for compiler
-            } else if( quartiles.q2 < k ) {
-                h += 2 << (j*2);
-            } else if( quartiles.q1 < k ) {
-                h += 1 << (j*2);
-            }
-        }
-        this.tmp_code[i] = h;
-    }
 
-    this.Lvalue = l_capturing(this.data_len);
-    this.Q = setQLo(this.Q, ((quartiles.q1*100)/quartiles.q3) % 16);
-    this.Q = setQHi(this.Q, ((quartiles.q2*100)/quartiles.q3) % 16);
-    this.lsh_code_valid = true;   
-}
-
-Tlsh.prototype.hash = function () 
-{
-    if (this.lsh_code_valid == false) {
-        return "ERROR IN PROCESSING";
-    }
-
-    var tmp = new Object();
-    tmp.checksum = new Uint8Array(TLSH_CHECKSUM_LEN);   
-    tmp.Lvalue = 0;
-    tmp.Q = 0;
-    tmp.tmp_code = new Uint8Array(CODE_SIZE);
-
-    for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {    
-        tmp.checksum[k] = swap_byte( this.checksum[k] );
-        debug && console.log("After swap_byte for checksum: tmp.checksum:"+tmp.checksum[k]+", tlsh.checksum:"+this.checksum[k]);
-    }
-    tmp.Lvalue = swap_byte( this.Lvalue );
-    tmp.Q = swap_byte( this.Q );
-    debug && console.log("After swap_byte for Q: tmp.Q:"+tmp.Q+", tlsh.Q:"+this.Q);
-    for( var i=0; i < CODE_SIZE; i++ ){
-        tmp.tmp_code[i] = this.tmp_code[CODE_SIZE-1-i];
-        debug && console.log("tmp.tmp_code["+i+"]:"+tmp.tmp_code[i]);
-    }
-
-    this.lsh_code = to_hex(tmp.checksum, TLSH_CHECKSUM_LEN);
-
-    tmpArray = new Uint8Array(1);
-    tmpArray[0] = tmp.Lvalue;
-    this.lsh_code = this.lsh_code.concat(to_hex(tmpArray, 1));
-
-    tmpArray[0] = tmp.Q;
-    this.lsh_code = this.lsh_code.concat(to_hex(tmpArray, 1));
-    this.lsh_code = this.lsh_code.concat(to_hex(tmp.tmp_code, CODE_SIZE));
-    return this.lsh_code;
-}
-
-Tlsh.prototype.reset = function () 
-{
-    this.checksum = new Uint8Array(TLSH_CHECKSUM_LEN);
-    this.slide_window = new Uint8Array(SLIDING_WND_SIZE);
-    this.a_bucket = new Uint32Array(BUCKETS);
-    this.data_len = 0;
-    this.tmp_code = new Uint8Array(CODE_SIZE);
-    this.Lvalue = 0;
-    this.Q = 0;
-    this.lsh_code = new String;   
-    this.lsh_code_valid = false;   
-}
-
-// len_diff defaults to true
-Tlsh.prototype.totalDiff = function(other, len_diff) 
-{
-    if (this == other) 
-    {
-        return 0;
-    }
-
-    len_diff = typeof len_diff !== 'undefined' ?  len_diff : true;
-    var diff = 0;
-    
-    if (len_diff) {
-        var ldiff = mod_diff( this.Lvalue, other.Lvalue, RANGE_LVALUE);
-        if ( ldiff == 0 )
-            diff = 0;
-        else if ( ldiff == 1 )
-            diff = 1;
-        else
-           diff += ldiff*12;
-    }
-    
-    var q1diff = mod_diff( getQLo(this.Q), getQLo(other.Q), RANGE_QRATIO);
-    if ( q1diff <= 1 )
-        diff += q1diff;
-    else           
-        diff += (q1diff-1)*12;
-    
-    var q2diff = mod_diff( getQHi(this.Q), getQHi(other.Q), RANGE_QRATIO);
-    if ( q2diff <= 1)
-        diff += q2diff;
-    else
-        diff += (q2diff-1)*12;
-    
-    for (var k = 0; k < TLSH_CHECKSUM_LEN; k++) {    
-      if (this.checksum[k] != other.checksum[k] ) {
-        diff ++;
-        break;
-      }
-    }
-    
-    diff += h_distance( CODE_SIZE, this.tmp_code, other.tmp_code );
-
-    return diff;
-}
-
-Tlsh.prototype.fromTlshStr = function(str) 
-{
-    if (str.length != TLSH_STRING_LEN) {
-        alert("Tlsh.fromTlshStr() - string has wrong length (" + str.length + " != " + TLSH_STRING_LEN + ")");
-        return;
-    }
-    for( var i=0; i < TLSH_STRING_LEN; i++ ) {
-        if (!( 
-            (str[i] >= '0' && str[i] <= '9') || 
-            (str[i] >= 'A' && str[i] <= 'F') ||
-            (str[i] >= 'a' && str[i] <= 'f') ))
-        {
-            alert("Tlsh.fromTlshStr() - string has invalid (non-hex) characters");
-            return;
-        }
-	}
-	
-	var tmp = from_hex(str);
-	// Order of assignment is based on order of fields in lsh_bin
-	// Also note that TLSH_CHECKSUM_LEN is 1
-	var i = 0;
-    this.checksum[i] = swap_byte( tmp[i++] );
-    this.Lvalue      = swap_byte( tmp[i++] );
-    this.Q           = swap_byte( tmp[i++] );
-	
-    for( var j=0; j < CODE_SIZE; j++ ) {
-        this.tmp_code[j] = (tmp[i+CODE_SIZE-1-j]);
-    }
-    this.lsh_code_valid = true;   
-}
