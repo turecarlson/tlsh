@@ -439,7 +439,7 @@ export class Tlsh {
         }
 
         // incoming data must more than or equal to 512 bytes
-        if (this.data_len < 256) {
+        if (this.data_len < 50) {
             alert("ERROR: length too small - " + this.data_len); //  + ")");
         }
 
